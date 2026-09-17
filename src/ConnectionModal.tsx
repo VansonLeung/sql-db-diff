@@ -220,7 +220,7 @@ export default function ConnectionModal({
           />
         )}
         <div className="secure-note">
-          Credentials are encrypted locally using macOS Keychain protection.
+          Credentials are encrypted locally using your operating system’s credential store.
         </div>
       </Form>
     </Modal>

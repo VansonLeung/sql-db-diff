@@ -35,7 +35,10 @@ async function run() {
     return bookmarks;
   }
   if (action === 'rows') {
-    const db = new DatabaseSync(path, { readOnly: true });
+    // This is our private result database, not a user-selected source. SQLite on
+    // macOS needs to recreate WAL sidecars when opening it in a fresh worker.
+    const db = new DatabaseSync(path);
+    db.exec('PRAGMA query_only=ON');
     try {
       return getRows(db, workerData.table, workerData.page, workerData.status);
     } finally {
@@ -91,15 +94,18 @@ async function run() {
       );
       emit({ state: 'running', completed: ++completed, total: request.tables.length, result });
     }
-    emit({ state: 'done', completed, total: request.tables.length });
   } finally {
     await left?.close();
     await right?.close();
     db.close();
   }
+  // Readers may start as soon as this event crosses the bridge. Close/checkpoint
+  // the writer first so a new worker can open the result file read-only.
+  emit({ state: 'done', completed: request.tables.length, total: request.tables.length });
 }
 run()
   .then((value) => parentPort!.postMessage({ value }))
   .catch((error) =>
     parentPort!.postMessage({ error: error instanceof Error ? error.message : String(error) }),
-  );
+  )
+  .finally(() => parentPort!.close());

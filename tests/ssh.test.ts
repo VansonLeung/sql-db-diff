@@ -5,7 +5,7 @@ import { createConnection } from 'node:net';
 import { execFileSync } from 'node:child_process';
 import ssh2 from 'ssh2';
 const { Server, utils } = ssh2;
-import { connect } from '../electron/drivers';
+import { connect } from '../desktop/drivers';
 import type { Bookmark } from '../src/shared';
 test(
   'SSH password/private-key tunnels reach PostgreSQL and MySQL and reject wrong host fingerprints',

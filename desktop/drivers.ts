@@ -59,6 +59,7 @@ export async function connect(b: Bookmark, database?: string): Promise<Driver> {
     ssh: SSH | undefined,
     server: Server | undefined;
   const close = async () => {
+    if (sqlite?.isTransaction) sqlite.exec('ROLLBACK');
     sqlite?.close();
     if (postgres) await postgres.end().catch(() => {});
     my?.destroy();

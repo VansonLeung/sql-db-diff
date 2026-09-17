@@ -375,13 +375,13 @@ export default function App() {
       <div className="browser-notice">
         <DatabaseOutlined />
         <h1>SQL DB Diff</h1>
-        <p>Open the Electron desktop app to connect to your databases.</p>
+        <p>Open the SQL DB Diff desktop app to connect to your databases.</p>
         <code>npm run dev</code>
       </div>
     );
   return (
     <div className="app-shell">
-      <header className="titlebar">
+      <header className="titlebar electrobun-webkit-app-region-drag">
         <span>SQL DB Diff</span>
         <span className="titlebar-tag">
           <LockOutlined /> Read-only workspace
@@ -476,7 +476,7 @@ export default function App() {
           <Button type="text" icon={<ExperimentOutlined />} disabled={busy} onClick={demo}>
             Try demo databases
           </Button>
-          <small>v0.1.0 · macOS</small>
+          <small>v0.1.0 · Desktop</small>
         </div>
       </aside>
       <main>

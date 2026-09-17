@@ -5,8 +5,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import pg from 'pg';
 import mysql from 'mysql2/promise';
-import { connect, connectionOptions } from '../electron/drivers';
-import { compareTable, openResults, defaultKeys, getRows } from '../electron/diff';
+import { connect, connectionOptions } from '../desktop/drivers';
+import { compareTable, openResults, defaultKeys, getRows } from '../desktop/diff';
 import type { Bookmark } from '../src/shared';
 
 for (const engine of ['postgres', 'mysql'] as const)

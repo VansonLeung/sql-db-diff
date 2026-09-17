@@ -4,7 +4,7 @@ import { mkdtemp, rm, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import { connect, connectionOptions, quote } from '../electron/drivers';
+import { connect, connectionOptions, quote } from '../desktop/drivers';
 import {
   compareTable,
   openResults,
@@ -12,8 +12,8 @@ import {
   defaultKeys,
   normalize,
   schemaChanged,
-} from '../electron/diff';
-import { requestSchema } from '../electron/validation';
+} from '../desktop/diff';
+import { requestSchema } from '../desktop/validation';
 
 async function fixture(fn: (paths: { dir: string; a: string; b: string }) => Promise<void>) {
   const dir = await mkdtemp(join(tmpdir(), 'sqldiff-test-'));

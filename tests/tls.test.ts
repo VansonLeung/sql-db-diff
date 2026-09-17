@@ -5,7 +5,7 @@ import { promisify } from 'node:util';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { connect } from '../electron/drivers';
+import { connect } from '../desktop/drivers';
 const exec = promisify(execFile);
 test(
   'TLS verifies custom CA, client certificates, hostname and rejects untrusted certificates on both engines',

@@ -1,24 +1,24 @@
 # SQL DB Diff
 
-A read-only macOS database comparison app built with Vite, React, TypeScript, Ant Design, and Electron. Supports PostgreSQL, MySQL, and local SQLite databases. Both sides must use the same engine.
+A read-only desktop database comparison app built with Vite, React, TypeScript, Ant Design, and [Electrobun](https://github.com/blackboardsh/electrobun). The backend runs on Bun; the interface uses the native system webview (WKWebView on macOS, WebView2 on Windows, WebKitGTK on Linux). Chromium/CEF and WebGPU are not bundled. Supports PostgreSQL, MySQL, and local SQLite databases. Both sides must use the same engine.
 
 ## Run
 
-Requires Node.js 24 LTS and npm.
+Requires Node.js 24 LTS and npm. `npm install` installs the pinned Bun 1.4.0 executable used for backend tests and worker bundling. Electrobun 2.0.1 packages the same Bun version. Its CLI downloads the matching Hutch/devkit on first use; subsequent builds reuse the cached toolchain.
 
 ```sh
 npm install
 npm run dev
 ```
 
-`npm run dev` starts Vite and Electron. React changes reload automatically; restart for Electron/backend changes. To run the production build:
+`npm run dev` starts Vite and Electrobun. React changes reload automatically; restart for desktop/backend changes. To run locally with bundled frontend assets:
 
 ```sh
 npm run build
 npm start
 ```
 
-If your npm configuration disables dependency install scripts, run `node node_modules/electron/install.js` after installation to download Electron.
+If your npm configuration disables install scripts, run `node node_modules/bun/install.js` once after installation. `npm run build` produces a development app with bundled frontend assets; `npm start` launches that app. End users do not need Node.js, npm, or Bun installed.
 
 ## Use
 
@@ -48,11 +48,13 @@ If your npm configuration disables dependency install scripts, run `node node_mo
 
 ## Local storage and security
 
-All bookmark data, including URLs, passwords, and SSH/TLS keys, is encrypted with Electron `safeStorage` (macOS Keychain backed) and saved atomically in `bookmarks.enc` under Electron's user-data directory. Saving fails if Keychain protection is unavailable; there is no plaintext fallback. Existing bookmarks can be edited, tested, and removed.
+All bookmark data, including URLs, passwords, and SSH/TLS keys, is encrypted with AES-256-GCM and saved atomically in `bookmarks.enc` under Electrobun's `Utils.paths.userData`. A separate random 256-bit key is stored with `Bun.secrets`: macOS Keychain, Windows Credential Manager, or the Linux Secret Service. Only the encryption key goes into the credential store, so large SSH keys and certificates do not hit credential-size limits. Missing keys or an unavailable credential store fail closed; there is no plaintext fallback. An instance lock prevents simultaneous processes from using the same vault and comparison directory.
 
-Temporary result files contain compared row values and use a private directory under `userData/comparisons`. They are not separately encrypted, and are deleted on cancellation, replacement, normal window close, or next startup after a crash. Results are session-only. Demo database files remain locally for reuse. Use FileVault if you need disk encryption for database and temporary files.
+**Migration from Electron:** the old application data is left untouched. The new app uses a different data directory and encrypted-file format; re-enter saved connections. Do not copy the old `bookmarks.enc` over the new one. Development and stable release channels also have separate data directories.
 
-Database drivers run in worker threads. The renderer uses a sandboxed, isolated preload bridge with a restricted IPC API and validated payloads. The app issues no writes to selected databases. A read-only database account is still appropriate for this tool.
+Temporary result files contain compared row values and use a private directory under `userData/comparisons`. They are not separately encrypted, and are deleted on cancellation, replacement, normal window close, or next startup after a crash. Results are session-only. Demo database files remain locally for reuse. Use operating-system disk encryption if you need encryption for database and temporary files.
+
+Database drivers run in worker threads. The renderer uses Electrobun's typed RPC bridge with a fixed set of application methods and validated payloads. The privileged webview is restricted to the bundled app URL (or the exact local Vite URL in development); remote navigation is blocked. The renderer does not import database drivers or runtime secrets. The app issues no writes to selected databases. A read-only database account is still appropriate for this tool.
 
 ## Validation
 
@@ -60,12 +62,13 @@ Database drivers run in worker threads. The renderer uses a sandboxed, isolated 
 npm run check
 npm test
 npm run test:smoke
-npx tsx scripts/benchmark.ts
+npm run test:smoke -- --dev-server # same native checks through Vite
+npm exec -- bun scripts/benchmark.ts
 ```
 
-Unit/integration tests cover SQLite read-only access, schema/row/field differences, large integers, binary and NULL values, composite/duplicate keys, missing tables, and a 50,000-row comparison with pagination. The Electron smoke test uses an isolated user-data directory, verifies the demo workflow and encrypted bookmarks, and saves `test-results/comparison.png`. The benchmark generates 200 tables with 50,000 rows on each side, verifies every result, and cleans up its fixtures.
+Tests cover SQLite read-only access, schema/row/field differences, large integers, binary and NULL values, composite/duplicate keys, missing tables, a 50,000-row comparison, encrypted-vault tampering/missing keys, instance locking, and real Bun worker lifecycle/cancellation. `npm run test:smoke` builds and launches an actual native-webview app, exercises the React demo workflow and typed RPC bridge, then checks encrypted persistence and temporary-file cleanup. It needs a graphical desktop session. Smoke builds use an isolated temporary data directory and an ephemeral encryption key; they do not alter real bookmarks or OS credentials. Smoke app bundles are isolated under `build/smoke/`, so the ordinary development app is unchanged.
 
-Measured on the development Mac: the synthetic SQLite benchmark read 20 million rows in 74.4 seconds with approximately 200 MiB peak process memory. Real performance depends on row size, difference volume, server load, and network latency. The packaged macOS app and Vite development workflow both passed the Electron smoke test.
+The benchmark generates 200 tables with 50,000 rows on each side, verifies every result, and cleans up its fixtures. Performance depends on row size, difference volume, server load, and network latency; earlier Electron measurements do not describe the Bun build.
 
 Real PostgreSQL/MySQL and SSH integration tests are opt-in and require dedicated disposable servers; they recreate databases named `diff_source` and `diff_target`:
 
@@ -75,19 +78,25 @@ docker run --rm -d --name sql-db-diff-test-mysql -e MYSQL_ROOT_PASSWORD=diff-tes
 # Once both servers are ready:
 TEST_DATABASE_SERVERS=1 npm test
 # Optional certificate tests reconfigure TLS on these disposable containers:
-TEST_TLS_DATABASE_SERVERS=1 npx tsx --test tests/tls.test.ts
-TEST_DATABASE_SERVERS=1 TEST_SSH_TLS=1 npx tsx --test tests/ssh.test.ts
+TEST_TLS_DATABASE_SERVERS=1 npm exec -- bun test tests/tls.test.ts
+TEST_DATABASE_SERVERS=1 TEST_SSH_TLS=1 npm exec -- bun test tests/ssh.test.ts
 docker stop sql-db-diff-test-pg sql-db-diff-test-mysql
 ```
 
-## macOS distribution
+## Distribution
+
+Build on the target operating system and architecture:
 
 ```sh
-npm run dist:mac
+npm run dist:mac  # macOS: stable app, compressed archive, installer/DMG
+npm run dist:win  # Windows x64: stable app and Windows installer
+npm run dist      # current host
 ```
 
-Produces DMG/ZIP artifacts in `release/` for the current Mac architecture. Public distribution requires your Apple Developer signing identity and notarization configuration. No signing credentials are included.
+Electrobun writes development apps and release bundles to `build/` and distribution artifacts to `artifacts/`. Release bundles use a self-extracting launcher, so their compressed size is smaller than their installed footprint. `dist:win` intentionally fails on macOS instead of producing a misleading cross-platform result. The GitHub Actions workflow builds macOS ARM64 and Windows x64 separately. Windows users need WebView2 installed; this project does not bundle the browser runtime. Fully offline deployments must provision WebView2 separately.
 
-Packaging reuses the locally installed Electron runtime. Optional SSH native accelerators are excluded; SSH uses its JavaScript implementation and Node's built-in crypto. SQLite uses Electron's built-in Node SQLite module, so no native dependency rebuild is required.
+Release builds always load bundled frontend assets and disable smoke mode. No Electron runtime, electron-builder, or production `node_modules` tree is shipped. Backend packages are bundled into the worker; optional SSH native accelerators are external and absent, so SSH uses its JavaScript implementation and Bun's crypto support. SQLite uses Bun's `node:sqlite` implementation. On macOS this uses system SQLite; a read-only WAL database whose sidecar files are absent may fail to open. Have its owner checkpoint it or provide a consistent SQLite backup; this application does not modify source databases to work around that restriction.
 
-Implementation references: [Electron security](https://www.electronjs.org/docs/latest/tutorial/security), [Node SQLite](https://nodejs.org/api/sqlite.html), [PostgreSQL TLS](https://node-postgres.com/features/ssl), [MySQL TLS](https://sidorares.github.io/node-mysql2/docs/documentation/ssl), [ssh2](https://github.com/mscdex/ssh2).
+Public macOS distribution requires your signing identity and notarization configuration (`build.mac.codesign` / `notarize`). Configure signing in your release environment before publishing Windows installers as well. No signing credentials are included.
+
+Implementation references: [Electrobun](https://framework.blackboard.sh/electrobun/), [Bun compatibility](https://bun.com/docs/runtime/nodejs-compat), [Bun secrets](https://bun.com/docs/runtime/secrets), [PostgreSQL TLS](https://node-postgres.com/features/ssl), [MySQL TLS](https://sidorares.github.io/node-mysql2/docs/documentation/ssl), [ssh2](https://github.com/mscdex/ssh2).
