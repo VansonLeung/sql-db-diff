@@ -302,6 +302,17 @@ h1 {
   font-size: 14px;
   font-weight: 600;
 }
+.input-kind {
+  margin-top: 10px;
+}
+.add-sql-file {
+  padding-left: 0;
+  margin-bottom: 6px;
+}
+.sql-textarea {
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  tab-size: 2;
+}
 .connection-select .ant-select-content {
   padding-left: 0 !important;
 }

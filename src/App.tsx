@@ -33,6 +33,7 @@ import {
   TableOutlined,
 } from '@ant-design/icons';
 import ConnectionModal from './ConnectionModal';
+import { PASTED_SQL_DATABASE } from './shared';
 import type {
   Bookmark,
   DataRow,
@@ -55,6 +56,12 @@ const emptyBookmark: Bookmark = {
   ssh: { enabled: false },
 };
 const initialEndpoint = { bookmarkId: '', database: '' };
+const bookmarkDatabase = (b: Bookmark) =>
+  b.engine === 'sqlite'
+    ? b.input === 'sql' && b.sqlSource === 'text'
+      ? PASTED_SQL_DATABASE
+      : b.file || ''
+    : b.database || (b.input === 'sql' ? 'sqldiff' : '');
 const primaryKeys = (t?: TableMeta) =>
   t?.columns
     .filter((c) => c.pk)
@@ -92,6 +99,11 @@ export default function App() {
   const { message } = AntApp.useApp();
   const [bookmarks, setBookmarks] = useState<Bookmark[]>([]),
     [editing, setEditing] = useState<Bookmark>();
+  const [addingSide, setAddingSide] = useState<'left' | 'right'>();
+  const [inputKinds, setInputKinds] = useState<Record<'left' | 'right', 'database' | 'sql'>>({
+    left: 'database',
+    right: 'database',
+  });
   const [left, setLeft] = useState<Endpoint>(initialEndpoint),
     [right, setRight] = useState<Endpoint>(initialEndpoint);
   const [databases, setDatabases] = useState<Record<string, string[]>>({}),
@@ -116,6 +128,7 @@ export default function App() {
   const [error, setError] = useState('');
   const runId = useRef<string | undefined>(undefined),
     loadVersion = useRef(0);
+  const schemaRun = useRef(false);
   const api = window.dbDiff;
   const report = (e: unknown) => {
     const text = e instanceof Error ? e.message : String(e);
@@ -131,7 +144,7 @@ export default function App() {
       if (p.state !== 'running') {
         setRunning(false);
         if (p.state === 'error') setError(p.message || 'Comparison failed.');
-        if (p.state === 'done') setTab('rows');
+        if (p.state === 'done') setTab(schemaRun.current ? 'schema' : 'rows');
       }
     });
   }, []);
@@ -170,12 +183,19 @@ export default function App() {
     setError('');
     runId.current = undefined;
   }
-  async function loadDatabases(id: string) {
+  async function loadDatabases(id: string, saved?: Bookmark) {
     if (!id) return;
     setDbLoading((s) => ({ ...s, [id]: true }));
     try {
       const dbs = await api.databases(id);
       setDatabases((d) => ({ ...d, [id]: dbs }));
+      const b = saved || bookmarks.find((b) => b.id === id);
+      if (b?.input === 'sql' && b.engine !== 'sqlite') {
+        const update = (e: Endpoint) =>
+          e.bookmarkId === id && !dbs.includes(e.database) ? { ...e, database: dbs[0] || '' } : e;
+        setLeft(update);
+        setRight(update);
+      }
       return dbs;
     } catch (e) {
       report(e);
@@ -188,7 +208,7 @@ export default function App() {
     const b = bookmarks.find((b) => b.id === id)!;
     const next = {
       bookmarkId: id,
-      database: b.engine === 'sqlite' ? b.file || '' : b.database || '',
+      database: bookmarkDatabase(b),
     };
     if (side === 'left') setLeft(next);
     else setRight(next);
@@ -197,6 +217,7 @@ export default function App() {
   const lb = bookmarks.find((b) => b.id === left.bookmarkId),
     rb = bookmarks.find((b) => b.id === right.bookmarkId);
   const compatible = !!lb && !!rb && lb.engine === rb.engine;
+  const fileSchemaOnly = [lb, rb].some((b) => b?.input === 'sql' && b.sqlContent === 'schema');
   async function inspect() {
     setLoading(true);
     setError('');
@@ -229,6 +250,7 @@ export default function App() {
     }
   }
   async function compare() {
+    schemaRun.current = schemaOnly || fileSchemaOnly;
     setError('');
     setResults({});
     setRows([]);
@@ -237,7 +259,13 @@ export default function App() {
     runId.current = undefined;
     setProgress({ runId: '', state: 'running', completed: 0, total: selected.length });
     try {
-      runId.current = await api.compare({ left, right, tables: selected, keys, schemaOnly });
+      runId.current = await api.compare({
+        left,
+        right,
+        tables: selected,
+        keys,
+        schemaOnly: schemaOnly || fileSchemaOnly,
+      });
     } catch (e) {
       setRunning(false);
       setProgress(undefined);
@@ -304,7 +332,7 @@ export default function App() {
     }),
     { added: 0, removed: 0, changed: 0, schemas: 0 },
   );
-  const busy = loading || running;
+  const busy = loading || running || !!dbLoading[left.bookmarkId] || !!dbLoading[right.bookmarkId];
   const pick = (id: string) => {
     setFocused(id);
     setPage(1);
@@ -314,26 +342,70 @@ export default function App() {
     <div className="endpoint-card">
       <div className="eyebrow">
         <span className={`side-marker ${side}`}>{side === 'left' ? 'A' : 'B'}</span>
-        {side === 'left' ? 'SOURCE DATABASE' : 'TARGET DATABASE'}
+        {side === 'left' ? 'SOURCE' : 'TARGET'}
       </div>
+      <Segmented
+        className="input-kind"
+        aria-label={`${side} input type`}
+        value={bookmark ? bookmark.input || 'database' : inputKinds[side]}
+        disabled={busy}
+        options={[
+          { value: 'database', label: 'Database' },
+          { value: 'sql', label: 'SQL' },
+        ]}
+        onChange={(input) => {
+          reset();
+          setInputKinds((kinds) => ({ ...kinds, [side]: input }));
+          (side === 'left' ? setLeft : setRight)(initialEndpoint);
+        }}
+      />
       <Select
         aria-label={`${side} connection`}
         className="connection-select"
         variant="borderless"
-        placeholder="Choose a connection"
+        placeholder={
+          (bookmark ? bookmark.input || 'database' : inputKinds[side]) === 'sql'
+            ? 'Choose a SQL bookmark'
+            : 'Choose a connection'
+        }
         value={endpoint.bookmarkId || undefined}
         disabled={busy}
         onChange={(id) => chooseConnection(side, id)}
-        options={bookmarks.map((x) => ({
-          value: x.id,
-          label: (
-            <span>
-              <DatabaseOutlined /> &nbsp;{x.name}{' '}
-              <span className="option-engine">{engineNames[x.engine]}</span>
-            </span>
-          ),
-        }))}
+        options={bookmarks
+          .filter(
+            (x) =>
+              (x.input || 'database') ===
+              (bookmark ? bookmark.input || 'database' : inputKinds[side]),
+          )
+          .map((x) => ({
+            value: x.id,
+            label: (
+              <span>
+                <DatabaseOutlined /> &nbsp;{x.name}{' '}
+                <span className="option-engine">{engineNames[x.engine]}</span>
+              </span>
+            ),
+          }))}
       />
+      {(bookmark ? bookmark.input || 'database' : inputKinds[side]) === 'sql' && (
+        <Button
+          type="link"
+          className="add-sql-file"
+          disabled={busy}
+          icon={<PlusOutlined />}
+          onClick={() => {
+            setAddingSide(side);
+            setEditing({
+              id: '',
+              name: '',
+              input: 'sql',
+              engine: (side === 'left' ? rb : lb)?.engine || 'sqlite',
+            });
+          }}
+        >
+          Add SQL
+        </Button>
+      )}
       <div className="database-select">
         <DatabaseOutlined />
         <Select
@@ -355,7 +427,7 @@ export default function App() {
             ]),
           ].map((db) => ({
             value: db,
-            label: bookmark?.engine === 'sqlite' ? db.split('/').pop()! : db,
+            label: bookmark?.engine === 'sqlite' ? db.split(/[\\/]/).pop()! : db,
           }))}
         />
         <Tooltip title="Refresh databases">
@@ -423,11 +495,15 @@ export default function App() {
                 <strong>{item.name}</strong>
                 <small>
                   {engineNames[item.engine]} ·{' '}
-                  {item.engine === 'sqlite'
-                    ? 'Local file'
-                    : item.ssh?.enabled
-                      ? 'SSH tunnel'
-                      : item.host || 'URL connection'}
+                  {item.input === 'sql'
+                    ? item.sqlSource === 'text'
+                      ? 'Pasted SQL'
+                      : 'SQL file'
+                    : item.engine === 'sqlite'
+                      ? 'Local file'
+                      : item.ssh?.enabled
+                        ? 'SSH tunnel'
+                        : item.host || 'URL connection'}
                 </small>
               </div>
               <div className="bookmark-actions">
@@ -519,7 +595,7 @@ export default function App() {
             <Button
               icon={<ReloadOutlined />}
               loading={loading}
-              disabled={!compatible || !left.database || !right.database || running}
+              disabled={!compatible || !left.database || !right.database || busy}
               onClick={inspect}
             >
               {meta ? 'Reload tables' : 'Load tables'}
@@ -547,8 +623,8 @@ export default function App() {
           </div>
           <div>
             <Checkbox
-              checked={schemaOnly}
-              disabled={busy}
+              checked={schemaOnly || fileSchemaOnly}
+              disabled={busy || fileSchemaOnly}
               onChange={(e) => setSchemaOnly(e.target.checked)}
             >
               Schema only
@@ -572,7 +648,7 @@ export default function App() {
               <Button
                 type="primary"
                 icon={<SwapOutlined />}
-                disabled={!meta || !selected.length || loading}
+                disabled={!meta || !selected.length || busy}
                 onClick={compare}
               >
                 Compare databases
@@ -580,6 +656,13 @@ export default function App() {
             )}
           </div>
         </div>
+        {fileSchemaOnly && (
+          <Alert
+            type="info"
+            showIcon
+            title="Schema-only comparison: one of the SQL inputs is marked as schema only."
+          />
+        )}
         {progress && (
           <div className="progress-strip">
             <ProgressBar
@@ -595,7 +678,8 @@ export default function App() {
             />
             <span>
               {progress.state === 'running'
-                ? `Comparing ${progress.table || 'schemas'} · ${(progress.scanned || 0).toLocaleString()} rows read`
+                ? progress.message ||
+                  `Comparing ${progress.table || 'schemas'} · ${(progress.scanned || 0).toLocaleString()} rows read`
                 : progress.state === 'done'
                   ? `Comparison complete · ${progress.completed} tables`
                   : progress.state === 'cancelled'
@@ -785,7 +869,7 @@ export default function App() {
                       .map((c) => ({ value: c.name, label: c.name + (c.pk ? ' · PK' : '') }))}
                   />
                 </div>
-                {!(keys[focused] || []).length && !schemaOnly && (
+                {!(keys[focused] || []).length && !schemaOnly && !fileSchemaOnly && (
                   <Alert
                     type="warning"
                     showIcon
@@ -942,26 +1026,31 @@ export default function App() {
       {editing && (
         <ConnectionModal
           value={editing}
-          onClose={() => setEditing(undefined)}
+          onClose={() => {
+            setEditing(undefined);
+            setAddingSide(undefined);
+          }}
           onSaved={(b) => {
             setBookmarks((s) => [...s.filter((x) => x.id !== b.id), b]);
             setEditing(undefined);
             setDatabases((d) => ({ ...d, [b.id]: [] }));
-            if (left.bookmarkId === b.id) {
+            if (left.bookmarkId === b.id || addingSide === 'left') {
               setLeft({
                 bookmarkId: b.id,
-                database: b.engine === 'sqlite' ? b.file || '' : b.database || '',
+                database: bookmarkDatabase(b),
               });
               reset();
             }
-            if (right.bookmarkId === b.id) {
+            if (right.bookmarkId === b.id || addingSide === 'right') {
               setRight({
                 bookmarkId: b.id,
-                database: b.engine === 'sqlite' ? b.file || '' : b.database || '',
+                database: bookmarkDatabase(b),
               });
               reset();
             }
-            message.success('Connection saved');
+            setAddingSide(undefined);
+            if (b.input === 'sql') void loadDatabases(b.id, b);
+            message.success('Input saved');
           }}
         />
       )}

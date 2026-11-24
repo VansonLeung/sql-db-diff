@@ -57,10 +57,14 @@ async function main() {
   });
 
   const rpc = BrowserView.defineRPC<DesktopRPC>({
-    maxRequestTime: 130_000,
+    maxRequestTime: 660_000,
     handlers: {
       requests: {
         _: (method, args) => service.invoke(method, args as unknown[]),
+        'smoke:sql-fixture': () => {
+          if (!smoke) throw new Error('Smoke fixtures are disabled.');
+          return process.env.SQL_DB_DIFF_SMOKE_SQL_FILE;
+        },
         'smoke:report': async (value) => {
           if (!smoke) throw new Error('Smoke reporting is disabled.');
           const result = z.object({ ok: z.boolean(), message: z.string().max(10000) }).parse(value);
@@ -90,17 +94,24 @@ async function main() {
       workerPath: join(PATHS.RESOURCES_FOLDER, 'app/bun/worker.js'),
       vault,
       chooseFile: async () =>
-        (
-          await Utils.openFileDialog({
-            canChooseFiles: true,
-            canChooseDirectory: false,
-            allowsMultipleSelection: false,
-          })
-        )[0],
+        smoke
+          ? join(dataRoot, 'smoke-input.sql')
+          : (
+              await Utils.openFileDialog({
+                canChooseFiles: true,
+                canChooseDirectory: false,
+                allowsMultipleSelection: false,
+              })
+            )[0],
       onProgress: (progress) => {
         if (!closing) rpc.send.progress(progress);
       },
     });
+    if (smoke)
+      await writeFile(
+        join(dataRoot, 'smoke-input.sql'),
+        "CREATE TABLE customers (id INTEGER PRIMARY KEY, name TEXT NOT NULL, email TEXT, plan TEXT DEFAULT 'starter'); INSERT INTO customers VALUES(1,'Ada Chen','ada@example.test','pro');",
+      );
     ApplicationMenu.setApplicationMenu([
       {
         label: 'SQL DB Diff',

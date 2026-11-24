@@ -10,7 +10,7 @@ export default {
     buildFolder: process.env.SQL_DB_DIFF_SMOKE_BUILD === '1' ? 'build/smoke' : 'build',
     artifactFolder: process.env.SQL_DB_DIFF_SMOKE_BUILD === '1' ? 'artifacts/smoke' : 'artifacts',
     mainProcess: 'bun',
-    bun: { entrypoint: 'desktop/main.ts' },
+    bun: { entrypoint: 'desktop/main.ts', external: ['pg-native', 'cpu-features', '*.node'] },
     copy: {
       'dist/index.html': 'views/mainview/index.html',
       'dist/assets': 'views/mainview/assets',

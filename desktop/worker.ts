@@ -2,11 +2,13 @@ import { parentPort, workerData } from 'node:worker_threads';
 import { DatabaseSync } from 'node:sqlite';
 import { join } from 'node:path';
 import { connect } from './drivers';
+import { importSqlite } from './sqlite-import';
 import { compareTable, getRows, openResults, defaultKeys } from './diff';
 import type { Bookmark, ComparisonRequest, Progress } from '../src/shared';
 
 async function run() {
   const { action, bookmark, database, path } = workerData;
+  if (action === 'import-sqlite') return importSqlite(workerData.source, path);
   if (action === 'demo') {
     const bookmarks: Bookmark[] = [];
     for (const side of ['source', 'target']) {

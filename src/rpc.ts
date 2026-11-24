@@ -7,6 +7,7 @@ type Request<F extends (...args: any[]) => any> = {
 export type DesktopRPC = {
   bun: {
     requests: {
+      'app:version': { params: []; response: number };
       'bookmarks:list': Request<API['bookmarks']['list']>;
       'bookmarks:save': Request<API['bookmarks']['save']>;
       'bookmarks:remove': Request<API['bookmarks']['remove']>;
@@ -19,6 +20,7 @@ export type DesktopRPC = {
       'compare:rows': Request<API['rows']>;
       'demo:create': Request<API['demo']>;
       'smoke:report': { params: { ok: boolean; message: string }; response: void };
+      'smoke:sql-fixture': { params: []; response: string | undefined };
     };
     messages: {};
   };

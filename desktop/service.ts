@@ -3,9 +3,11 @@ import { join } from 'node:path';
 import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
-import type { Bookmark, Progress } from '../src/shared';
+import type { Bookmark, ComparisonRequest, Progress } from '../src/shared';
+import { DESKTOP_PROTOCOL_VERSION } from '../src/shared';
 import type { BookmarkVault } from './vault';
 import { bookmarkSchema, endpointSchema, requestSchema } from './validation';
+import { cleanupStaleImports, createImportSession } from './imports';
 
 export async function createService(options: {
   dataRoot: string;
@@ -18,10 +20,19 @@ export async function createService(options: {
   let cancellationVersion = 0;
   let shuttingDown = false;
   let runCleanup: Promise<void> = Promise.resolve();
-  let active: { worker: Worker; id: string; dir: string; running: boolean } | undefined;
+  type Run = {
+    worker?: Worker;
+    controller: AbortController;
+    id: string;
+    dir: string;
+    running: boolean;
+    finished: Promise<void>;
+  };
+  let active: Run | undefined;
   let bookmarkQueue: Promise<unknown> = Promise.resolve();
   const tasks = new Set<Worker>();
   const readers = new Map<Worker, string>();
+  const operations = new Set<AbortController>();
   const dataRoot = () => options.dataRoot;
   const readBookmarks = () => options.vault.read();
   const writeBookmarks = (items: Bookmark[]) => options.vault.write(items);
@@ -35,16 +46,29 @@ export async function createService(options: {
     if (!b) throw new Error('Connection bookmark no longer exists.');
     return b;
   }
-  function task(data: { action: string; path?: string; [key: string]: unknown }): Promise<any> {
+  function task(
+    data: { action: string; path?: string; [key: string]: unknown },
+    signal?: AbortSignal,
+  ): Promise<any> {
     if (shuttingDown) return Promise.reject(new Error('Application is closing.'));
+    signal?.throwIfAborted();
     return new Promise((resolve, reject) => {
       const worker = new Worker(options.workerPath, { workerData: data });
       tasks.add(worker);
       if (data.action === 'rows' && data.path) readers.set(worker, data.path);
       let settled = false;
+      const abort = () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        void worker.terminate().then(() => reject(new Error('Operation cancelled.')), reject);
+      };
+      signal?.addEventListener('abort', abort, { once: true });
       const timer = setTimeout(() => {
-        void worker.terminate();
-        reject(new Error('Operation timed out after 120 seconds.'));
+        settled = true;
+        void worker
+          .terminate()
+          .then(() => reject(new Error('Operation timed out after 120 seconds.')), reject);
       }, 120000);
       worker.on('message', (message) => {
         settled = true;
@@ -57,6 +81,7 @@ export async function createService(options: {
         reject(error);
       });
       worker.on('exit', (code) => {
+        signal?.removeEventListener('abort', abort);
         clearTimeout(timer);
         tasks.delete(worker);
         readers.delete(worker);
@@ -71,7 +96,11 @@ export async function createService(options: {
       if (old) {
         const resultPath = join(old.dir, 'results.sqlite');
         await Promise.all([
-          old.worker.terminate(),
+          (async () => {
+            old.controller.abort();
+            await old.worker?.terminate();
+            await old.finished;
+          })(),
           ...[...readers]
             .filter(([, path]) => path === resultPath)
             .map(([worker]) => worker.terminate()),
@@ -83,12 +112,130 @@ export async function createService(options: {
   }
 
   const handlers = new Map<string, (...args: any[]) => unknown>();
+  handlers.set('app:version', () => DESKTOP_PROTOCOL_VERSION);
   function handle(channel: string, fn: (...args: any[]) => unknown) {
     handlers.set(channel, fn);
   }
   const runs = join(dataRoot(), 'comparisons');
+  const imports = join(dataRoot(), 'imports');
+  await cleanupStaleImports(imports);
   await rm(runs, { recursive: true, force: true });
   await mkdir(runs, { recursive: true, mode: 0o700 });
+  async function sourceTask(action: 'databases' | 'inspect', b: Bookmark, database?: string) {
+    const controller = new AbortController();
+    operations.add(controller);
+    const timer = setTimeout(() => controller.abort(), 600_000);
+    let session: Awaited<ReturnType<typeof createImportSession>> | undefined;
+    try {
+      session = await createImportSession(imports, controller.signal);
+      const prepared = await session.prepare(b, (source, path) =>
+        task({ action: 'import-sqlite', source, path }, controller.signal),
+      );
+      if (action === 'databases' && prepared.databases) return prepared.databases;
+      if (
+        b.input === 'sql' &&
+        b.engine !== 'sqlite' &&
+        database &&
+        !prepared.databases?.includes(database)
+      )
+        throw new Error(
+          'Selected database is absent from the SQL input. Refresh databases and reload tables.',
+        );
+      return await task(
+        {
+          action,
+          bookmark: prepared.bookmark,
+          database: b.input === 'sql' && b.engine === 'sqlite' ? undefined : database,
+        },
+        controller.signal,
+      );
+    } finally {
+      clearTimeout(timer);
+      try {
+        await session?.cleanup();
+      } finally {
+        operations.delete(controller);
+      }
+    }
+  }
+
+  async function runComparison(
+    run: Run,
+    request: ComparisonRequest,
+    left: Bookmark,
+    right: Bookmark,
+  ) {
+    let session: Awaited<ReturnType<typeof createImportSession>> | undefined;
+    let complete: Progress | undefined, failure: unknown;
+    try {
+      session = await createImportSession(imports, run.controller.signal);
+      const prepare = async (b: Bookmark, database: string, side: string) => {
+        if (b.input === 'sql')
+          options.onProgress({
+            runId: run.id,
+            state: 'running',
+            completed: 0,
+            total: request.tables.length,
+            message: `Importing ${side} SQL ${b.sqlSource === 'text' ? 'text' : 'file'}…`,
+          });
+        const prepared = await session!.prepare(b, (source, path) =>
+          task({ action: 'import-sqlite', source, path }, run.controller.signal),
+        );
+        if (b.input === 'sql' && b.engine !== 'sqlite' && !prepared.databases?.includes(database))
+          throw new Error(
+            'Selected database is absent from the SQL input. Refresh databases and reload tables.',
+          );
+        return prepared.bookmark;
+      };
+      const a = await prepare(left, request.left.database, 'source');
+      const b = await prepare(right, request.right.database, 'target');
+      run.controller.signal.throwIfAborted();
+      await new Promise<void>((resolve, reject) => {
+        const worker = new Worker(options.workerPath, {
+          workerData: {
+            action: 'compare',
+            request,
+            left: a,
+            right: b,
+            path: join(run.dir, 'results.sqlite'),
+            runId: run.id,
+          },
+        });
+        run.worker = worker;
+        worker.on('message', (m) => {
+          if (m.progress?.state === 'done') {
+            complete = m.progress;
+            resolve();
+          } else if (m.progress && active?.id === run.id) options.onProgress(m.progress);
+          if (m.error) reject(new Error(m.error));
+        });
+        worker.on('error', reject);
+        worker.on('exit', (code) => {
+          if (!complete) reject(new Error(`Comparison worker exited before completing (${code}).`));
+        });
+      });
+    } catch (error) {
+      failure = error;
+    } finally {
+      await run.worker?.terminate();
+      try {
+        await session?.cleanup();
+      } catch (error) {
+        failure ||= error;
+      }
+    }
+    if (active?.id !== run.id || run.controller.signal.aborted) return;
+    run.running = false;
+    if (failure)
+      options.onProgress({
+        runId: run.id,
+        state: 'error',
+        completed: 0,
+        total: request.tables.length,
+        message: failure instanceof Error ? failure.message : String(failure),
+      });
+    else if (complete) options.onProgress(complete);
+  }
   handle('bookmarks:list', readBookmarks);
   handle('bookmarks:save', (value) =>
     mutate(async (items) => {
@@ -106,19 +253,13 @@ export async function createService(options: {
     }),
   );
   handle('file:choose', options.chooseFile);
-  handle('connection:test', (value) =>
-    task({ action: 'databases', bookmark: bookmarkSchema.parse(value) }),
-  );
+  handle('connection:test', (value) => sourceTask('databases', bookmarkSchema.parse(value)));
   handle('databases:list', async (id) =>
-    task({ action: 'databases', bookmark: await bookmark(z.string().parse(id)) }),
+    sourceTask('databases', await bookmark(z.string().parse(id))),
   );
   handle('schema:inspect', async (value) => {
     const e = endpointSchema.parse(value);
-    return task({
-      action: 'inspect',
-      bookmark: await bookmark(e.bookmarkId),
-      database: e.database,
-    });
+    return sourceTask('inspect', await bookmark(e.bookmarkId), e.database);
   });
   handle('compare:start', async (value) => {
     if (startingRun || active?.running)
@@ -133,6 +274,9 @@ export async function createService(options: {
       ]);
       if (left.engine !== right.engine)
         throw new Error('Select two databases using the same engine.');
+      request.schemaOnly ||= [left, right].some(
+        (b) => b.input === 'sql' && b.sqlContent === 'schema',
+      );
       await clearRun();
       const dir = await mkdtemp(join(runs, 'run-')),
         id = randomUUID();
@@ -140,41 +284,15 @@ export async function createService(options: {
         await rm(dir, { recursive: true, force: true });
         throw new Error('Comparison cancelled.');
       }
-      const worker = new Worker(options.workerPath, {
-        workerData: {
-          action: 'compare',
-          request,
-          left,
-          right,
-          path: join(dir, 'results.sqlite'),
-          runId: id,
-        },
-      });
-      active = { worker, id, dir, running: true };
-      const fail = (message: string) => {
-        if (active?.id === id && active.running) {
-          active.running = false;
-          options.onProgress({
-            runId: id,
-            state: 'error',
-            completed: 0,
-            total: request.tables.length,
-            message,
-          });
-        }
+      const run: Run = {
+        controller: new AbortController(),
+        id,
+        dir,
+        running: true,
+        finished: Promise.resolve(),
       };
-      worker.on('message', (m) => {
-        if (active?.id !== id) return;
-        if (m.progress) {
-          if (m.progress.state === 'done') active.running = false;
-          options.onProgress(m.progress);
-        }
-        if (m.error) fail(m.error);
-      });
-      worker.on('error', (e) => fail(e.message));
-      worker.on('exit', (code) => {
-        fail(`Comparison worker exited before completing (${code}).`);
-      });
+      active = run;
+      run.finished = runComparison(run, request, left, right);
       return id;
     } finally {
       startingRun = false;
@@ -229,6 +347,7 @@ export async function createService(options: {
     async close() {
       shuttingDown = true;
       cancellationVersion++;
+      for (const controller of operations) controller.abort();
       await Promise.all([...tasks].map((worker) => worker.terminate()));
       await Promise.allSettled([...pending]);
       await clearRun();

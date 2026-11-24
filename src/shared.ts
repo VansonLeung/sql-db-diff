@@ -1,8 +1,16 @@
 export type Engine = 'postgres' | 'mysql' | 'sqlite';
+export const DESKTOP_PROTOCOL_VERSION = 1;
+export const SQL_TEXT_LIMIT = 5_000_000;
+export const PASTED_SQL_DATABASE = 'Pasted SQL';
 export interface Bookmark {
   id: string;
   name: string;
   engine: Engine;
+  input?: 'database' | 'sql';
+  sqlSource?: 'file' | 'text';
+  sqlText?: string;
+  sqlContent?: 'schema' | 'data';
+  sqlVersion?: string;
   host?: string;
   port?: number;
   user?: string;
